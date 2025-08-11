@@ -4,6 +4,8 @@ Copyright © 2025 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"proxyhub/pkg/log"
 	"proxyhub/services"
@@ -12,6 +14,10 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
+
+type localIPKeyType struct{}
+
+var localIPKey = localIPKeyType{}
 
 var httpArgs services.HTTPArgs
 
@@ -27,7 +33,69 @@ var httpCmd = &cobra.Command{
 
 		log.Info("http 模式启动", zap.String("port", *args.Local))
 
-		err := http.ListenAndServe(*args.Local, proxy)
+		// HTTP 请求鉴权（普通请求与 CONNECT）
+		proxy.OnRequest().DoFunc(func(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+			// 从 Proxy-Authorization 读取凭证
+			user, pass, ok := services.ParseBasicAuth(r.Header.Get("Proxy-Authorization"))
+			if !ok && !*args.AuthNoUser {
+				return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusProxyAuthRequired, "Proxy Authentication Required")
+			}
+			clientIP := services.ExtractIP(r.RemoteAddr)
+			allowed, _ := services.Authorize(r.Context(), "http", user, pass, clientIP, map[string]string{
+				"Method": r.Method,
+				"Host":   r.Host,
+				"Path":   r.URL.Path,
+			})
+			if !allowed {
+				return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusProxyAuthRequired, "Proxy Authentication Failed")
+			}
+			return r, nil
+		})
+
+		proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+			r := ctx.Req
+			user, pass, ok := services.ParseBasicAuth(r.Header.Get("Proxy-Authorization"))
+			if !ok && !*args.AuthNoUser {
+				ctx.Resp = goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusProxyAuthRequired, "Proxy Authentication Required")
+				return goproxy.RejectConnect, host
+			}
+			clientIP := services.ExtractIP(r.RemoteAddr)
+			allowed, _ := services.Authorize(r.Context(), "http-connect", user, pass, clientIP, map[string]string{"Host": host})
+			if !allowed {
+				ctx.Resp = goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusProxyAuthRequired, "Proxy Authentication Failed")
+				return goproxy.RejectConnect, host
+			}
+			return goproxy.OkConnect, host
+		})
+
+		// 包一层 handler，在请求进入 goproxy 前注入入口 IP
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if localAddr, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
+				if tcpAddr, ok := localAddr.(*net.TCPAddr); ok {
+					r = r.WithContext(context.WithValue(r.Context(), localIPKey, tcpAddr.IP))
+				}
+			}
+			proxy.ServeHTTP(w, r)
+		})
+
+		// 如果设置了bind-listen标志，配置代理使用监听IP作为外出IP
+		if *args.BindListen {
+			// 自定义 Transport，根据入口 IP 出口
+			proxy.Tr = &http.Transport{
+				DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+					if ip, ok := ctx.Value(localIPKey).(net.IP); ok && ip != nil {
+						dialer := &net.Dialer{
+							LocalAddr: &net.TCPAddr{IP: ip},
+						}
+						return dialer.DialContext(ctx, network, address)
+					}
+					// 没取到就默认
+					return new(net.Dialer).DialContext(ctx, network, address)
+				},
+			}
+		}
+
+		err := http.ListenAndServe(*args.Local, handler)
 		if err != nil {
 			log.Fatal(err.Error())
 		}

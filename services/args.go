@@ -14,15 +14,19 @@ const (
 )
 
 type Args struct {
-	Local   *string
-	Parent  *string
-	Verbose *bool
-	LogFile *string
-	LogWarn *bool
-	Env     *string
-
-	CertBytes []byte
-	KeyBytes  []byte
+	Local            *string // 本地监听地址
+	Parent           *string // 父级代理地址
+	Verbose          *bool   // 是否打印详细日志
+	LogFile          *string // 日志文件路径
+	LogWarn          *bool   // 只记录警告日志
+	Env              *string // 环境
+	BindListen       *bool   // 使用监听IP作为出口IP
+	AuthURL          *string // 认证URL
+	AuthNoUser       *bool   // 认证不使用用户名密码
+	AuthCacheSec     *int    // 认证缓存秒数
+	AuthFailCacheSec *int    // 认证失败缓存秒数
+	CertBytes        []byte
+	KeyBytes         []byte
 }
 type TunnelServerArgs struct {
 	Args

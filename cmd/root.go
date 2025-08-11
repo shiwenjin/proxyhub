@@ -53,6 +53,14 @@ func init() {
 	args.LogFile = rootCmd.PersistentFlags().StringP("log", "l", "", "log file path, empty means output to console")
 	args.LogWarn = rootCmd.PersistentFlags().Bool("warn", false, "only log warn mode")
 	args.Env = rootCmd.PersistentFlags().String("env", "dev", "env")
+	args.BindListen = rootCmd.PersistentFlags().Bool("bind-listen", false, "use listening IP as outgoing IP for proxy connections")
+	args.AuthURL = rootCmd.PersistentFlags().String("auth-url", "", "HTTP API address for proxy authentication, 204 means success")
+	args.AuthNoUser = rootCmd.PersistentFlags().Bool("auth-nouser", false, "allow auth without Proxy-Authorization user/pass")
+	args.AuthCacheSec = rootCmd.PersistentFlags().Int("auth-cache", 0, "cache success auth result seconds (0=disabled)")
+	args.AuthFailCacheSec = rootCmd.PersistentFlags().Int("auth-fail-cache", 0, "cache failed auth result seconds (0=disabled)")
+
+	// 初始化 Resty 鉴权客户端（在 flags 解析后）
+	cobra.OnInitialize(func() { services.InitAuth(args) })
 
 	certTLS := rootCmd.PersistentFlags().StringP("cert", "C", "proxy.crt", "cert file for tls")
 	keyTLS := rootCmd.PersistentFlags().StringP("key", "K", "proxy.key", "key file for tls")
