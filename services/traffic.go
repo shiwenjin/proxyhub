@@ -6,14 +6,15 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
+	"proxyhub/pkg/log"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"proxyhub/pkg/log"
+
 	"go.uber.org/zap"
+	"resty.dev/v3"
 )
 
 type TrafficRecord struct {
@@ -66,7 +67,7 @@ func NewTrafficReporter(a *Args, defaultID string) *TrafficReporter {
 		interval:   interval,
 		fastGlobal: a.FastGlobal != nil && *a.FastGlobal,
 		serviceID:  id,
-		client: &http.Client{Timeout: 5 * time.Second},
+		client:     &http.Client{Timeout: 5 * time.Second},
 	}
 	return tr
 }
@@ -76,45 +77,51 @@ func (tr *TrafficReporter) ReportOnce(rec TrafficRecord) error {
 	if tr == nil {
 		return nil
 	}
-	u, err := url.Parse(tr.trafficURL)
-	if err != nil { return err }
-	q := u.Query()
-	q.Set("id", rec.ID)
-	q.Set("server_addr", rec.ServerAddr)
-	q.Set("client_addr", rec.ClientAddr)
-	if rec.TargetAddr != "" { q.Set("target_addr", rec.TargetAddr) }
-	if rec.Username != "" { q.Set("username", rec.Username) }
-	q.Set("bytes", strconv.FormatInt(rec.Bytes, 10))
-	if rec.OutLocalAddr != "" { q.Set("out_local_addr", rec.OutLocalAddr) }
-	if rec.OutRemoteAddr != "" { q.Set("out_remote_addr", rec.OutRemoteAddr) }
-	if rec.Upstream != "" { q.Set("upstream", rec.Upstream) }
-	if rec.SniffDomain != "" { q.Set("sniff_domain", rec.SniffDomain) }
-	u.RawQuery = q.Encode()
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
-	if err != nil { return err }
-	log.Info("traffic report (GET)",
-		zap.String("mode", tr.mode),
-		zap.String("url", u.String()),
-		zap.String("id", rec.ID),
-		zap.Int64("bytes", rec.Bytes),
-		zap.String("server_addr", rec.ServerAddr),
-		zap.String("client_addr", rec.ClientAddr),
-		zap.String("target_addr", rec.TargetAddr),
-	)
-	resp, err := tr.client.Do(req)
-	if err != nil { return err }
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
+	params := map[string]string{
+		"id":          rec.ID,
+		"server_addr": rec.ServerAddr,
+		"client_addr": rec.ClientAddr,
+		"bytes":       strconv.FormatInt(rec.Bytes, 10),
+	}
+	if rec.TargetAddr != "" {
+		params["target_addr"] = rec.TargetAddr
+	}
+	if rec.Username != "" {
+		params["username"] = rec.Username
+	}
+	if rec.OutLocalAddr != "" {
+		params["out_local_addr"] = rec.OutLocalAddr
+	}
+	if rec.OutRemoteAddr != "" {
+		params["out_remote_addr"] = rec.OutRemoteAddr
+	}
+	if rec.Upstream != "" {
+		params["upstream"] = rec.Upstream
+	}
+	if rec.SniffDomain != "" {
+		params["sniff_domain"] = rec.SniffDomain
+	}
+	resp, err := resty.New().R().
+		SetHeader("Accept", "application/json").
+		SetQueryParams(params).
+		Get(tr.trafficURL)
+	if err != nil {
+		return err
+	}
+
+	// 204 No Content
+	if resp.StatusCode() != http.StatusNoContent {
 		log.Warn("traffic report failed",
-			zap.Int("status", resp.StatusCode),
-			zap.String("url", u.String()),
+			zap.Int("status", resp.StatusCode()),
+			zap.String("url", tr.trafficURL),
 			zap.Int64("bytes", rec.Bytes),
 		)
-		return fmt.Errorf("traffic report failed, status=%d", resp.StatusCode)
+		return fmt.Errorf("traffic report failed, status=%d", resp.StatusCode())
 	}
+
 	log.Info("traffic report ok",
-		zap.Int("status", resp.StatusCode),
-		zap.String("url", u.String()),
+		zap.Int("status", resp.StatusCode()),
+		zap.String("url", tr.trafficURL),
 		zap.Int64("bytes", rec.Bytes),
 	)
 	return nil
@@ -127,7 +134,9 @@ func (tr *TrafficReporter) StartGlobalBatch(recordsCh <-chan TrafficRecord) {
 	}
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
-	if tr.started { return }
+	if tr.started {
+		return
+	}
 	tr.started = true
 	tr.batchStop = make(chan struct{})
 	go func() {
@@ -135,10 +144,14 @@ func (tr *TrafficReporter) StartGlobalBatch(recordsCh <-chan TrafficRecord) {
 		defer ticker.Stop()
 		batch := make([]TrafficRecord, 0, 64)
 		flush := func() {
-			if len(batch) == 0 { return }
+			if len(batch) == 0 {
+				return
+			}
 			// sum bytes for logging
 			var total int64
-			for i := range batch { total += batch[i].Bytes }
+			for i := range batch {
+				total += batch[i].Bytes
+			}
 			buf, _ := json.Marshal(batch)
 			req, err := http.NewRequest(http.MethodPost, tr.trafficURL, bytes.NewReader(buf))
 			if err != nil {
@@ -177,7 +190,8 @@ func (tr *TrafficReporter) StartGlobalBatch(recordsCh <-chan TrafficRecord) {
 		for {
 			select {
 			case <-tr.batchStop:
-				flush(); return
+				flush()
+				return
 			case rec := <-recordsCh:
 				batch = append(batch, rec)
 			case <-ticker.C:
@@ -189,7 +203,8 @@ func (tr *TrafficReporter) StartGlobalBatch(recordsCh <-chan TrafficRecord) {
 
 // StopGlobalBatch stops the global batch goroutine
 func (tr *TrafficReporter) StopGlobalBatch() {
-	tr.mu.Lock(); defer tr.mu.Unlock()
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
 	if tr.started {
 		close(tr.batchStop)
 		tr.started = false
@@ -202,9 +217,9 @@ func (tr *TrafficReporter) StopGlobalBatch() {
 
 type CountingConn struct {
 	net.Conn
-	readN  int64
-	writeN int64
-	last   int64
+	readN   int64
+	writeN  int64
+	last    int64
 	onClose func(total int64)
 }
 
@@ -238,14 +253,14 @@ func (c *CountingConn) SetOnClose(fn func(total int64)) { c.onClose = fn }
 // BuildRecord builds a TrafficRecord with common fields
 func (tr *TrafficReporter) BuildRecord(serverAddr, clientAddr, targetAddr string, outConn net.Conn, username, sniffDomain string, bytes int64) TrafficRecord {
 	rec := TrafficRecord{
-		ID:           tr.serviceID,
-		ServerAddr:   serverAddr,
-		ClientAddr:   clientAddr,
-		TargetAddr:   targetAddr,
-		Username:     username,
-		Bytes:        bytes,
-		Upstream:     "",
-		SniffDomain:  sniffDomain,
+		ID:          tr.serviceID,
+		ServerAddr:  serverAddr,
+		ClientAddr:  clientAddr,
+		TargetAddr:  targetAddr,
+		Username:    username,
+		Bytes:       bytes,
+		Upstream:    "",
+		SniffDomain: sniffDomain,
 	}
 	if outConn != nil {
 		rec.OutLocalAddr = hostPort(outConn.LocalAddr())
@@ -255,6 +270,8 @@ func (tr *TrafficReporter) BuildRecord(serverAddr, clientAddr, targetAddr string
 }
 
 func hostPort(a net.Addr) string {
-	if a == nil { return "" }
+	if a == nil {
+		return ""
+	}
 	return a.String()
 }
