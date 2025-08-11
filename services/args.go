@@ -11,6 +11,8 @@ const (
 	CONN_CONTROL = uint8(1)
 	CONN_SERVER  = uint8(2)
 	CONN_CLIENT  = uint8(3)
+	TRAFFIC_MODE_NORMAL = "normal"
+	TRAFFIC_MODE_FAST   = "fast"
 )
 
 type Args struct {
@@ -23,6 +25,13 @@ type Args struct {
 
 	CertBytes []byte
 	KeyBytes  []byte
+
+	// Traffic reporting
+	TrafficURL      *string
+	TrafficMode     *string // normal | fast
+	TrafficInterval *int    // seconds
+	FastGlobal      *bool   // only effective when TrafficMode == fast
+	ServiceID       *string // id field in report
 }
 type TunnelServerArgs struct {
 	Args

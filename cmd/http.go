@@ -1,9 +1,11 @@
 /*
-Copyright © 2025 NAME HERE <EMAIL ADDRESS>
+Copyright 2025 NAME HERE EMAIL ADDRESS
 */
 package cmd
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"proxyhub/pkg/log"
 	"proxyhub/services"
@@ -18,14 +20,95 @@ var httpArgs services.HTTPArgs
 // httpCmd represents the http command
 var httpCmd = &cobra.Command{
 	Use:              "http",
-	Short:            "HTTP 代理",
 	TraverseChildren: true,
 	Run: func(cmd *cobra.Command, _ []string) {
-		// 创建代理服务器并开始监听
 		proxy := goproxy.NewProxyHttpServer()
 		proxy.Verbose = *args.Verbose
 
-		log.Info("http 模式启动", zap.String("port", *args.Local))
+		// Traffic reporter (optional)
+		reporter := services.NewTrafficReporter(&args, "http")
+		var recordsCh chan services.TrafficRecord
+		if reporter != nil && reporterModeFast(reporter) && reporterFastGlobal(reporter) {
+			recordsCh = make(chan services.TrafficRecord, 2048)
+			reporter.StartGlobalBatch(recordsCh)
+		}
+
+		// Custom transport to wrap dials
+		tr := &http.Transport{}
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			outConn, err := net.Dial(network, addr)
+			if err != nil {
+				return nil, err
+			}
+			if reporter == nil {
+				return outConn, nil
+			}
+			c := &services.CountingConn{Conn: outConn}
+			serverAddr := *args.Local
+			clientAddr := "" // not trivial to fetch here
+			targetAddr := addr
+			if !reporterModeFast(reporter) {
+				c.SetOnClose(func(total int64) {
+					rec := reporter.BuildRecord(serverAddr, clientAddr, targetAddr, outConn, "", "", total)
+					_ = reporter.ReportOnce(rec)
+				})
+				return c, nil
+			}
+			interval := reporterInterval(reporter)
+			if reporterFastGlobal(reporter) && recordsCh != nil {
+				go perConnDeltaToChan(ctx, c, interval, func(d int64) {
+					if d > 0 {
+						recordsCh <- reporter.BuildRecord(serverAddr, clientAddr, targetAddr, outConn, "", "", d)
+					}
+				})
+			} else {
+				go perConnDeltaToReport(ctx, c, interval, func(d int64) {
+					if d > 0 {
+						_ = reporter.ReportOnce(reporter.BuildRecord(serverAddr, clientAddr, targetAddr, outConn, "", "", d))
+					}
+				})
+			}
+			return c, nil
+		}
+		proxy.Tr = tr
+		proxy.ConnectDial = func(network, addr string) (net.Conn, error) {
+			// HTTPS CONNECT
+			outConn, err := net.Dial(network, addr)
+			if err != nil {
+				return nil, err
+			}
+			if reporter == nil {
+				return outConn, nil
+			}
+			c := &services.CountingConn{Conn: outConn}
+			serverAddr := *args.Local
+			clientAddr := ""
+			targetAddr := addr
+			if !reporterModeFast(reporter) {
+				c.SetOnClose(func(total int64) {
+					rec := reporter.BuildRecord(serverAddr, clientAddr, targetAddr, outConn, "", "", total)
+					_ = reporter.ReportOnce(rec)
+				})
+				return c, nil
+			}
+			interval := reporterInterval(reporter)
+			if reporterFastGlobal(reporter) && recordsCh != nil {
+				go perConnDeltaToChan(context.Background(), c, interval, func(d int64) {
+					if d > 0 {
+						recordsCh <- reporter.BuildRecord(serverAddr, clientAddr, targetAddr, outConn, "", "", d)
+					}
+				})
+			} else {
+				go perConnDeltaToReport(context.Background(), c, interval, func(d int64) {
+					if d > 0 {
+						_ = reporter.ReportOnce(reporter.BuildRecord(serverAddr, clientAddr, targetAddr, outConn, "", "", d))
+					}
+				})
+			}
+			return c, nil
+		}
+
+		log.Info("http ", zap.String("port", *args.Local))
 
 		err := http.ListenAndServe(*args.Local, proxy)
 		if err != nil {
