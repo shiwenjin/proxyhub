@@ -4,13 +4,13 @@ package services
 // t := tcp.Flag("tcp-timeout", "tcp timeout milliseconds when connect to real server or parent proxy").Default("2000").Int()
 
 const (
-	TYPE_TCP     = "tcp"
-	TYPE_UDP     = "udp"
-	TYPE_HTTP    = "http"
-	TYPE_TLS     = "tls"
-	CONN_CONTROL = uint8(1)
-	CONN_SERVER  = uint8(2)
-	CONN_CLIENT  = uint8(3)
+	TYPE_TCP            = "tcp"
+	TYPE_UDP            = "udp"
+	TYPE_HTTP           = "http"
+	TYPE_TLS            = "tls"
+	CONN_CONTROL        = uint8(1)
+	CONN_SERVER         = uint8(2)
+	CONN_CLIENT         = uint8(3)
 	TRAFFIC_MODE_NORMAL = "normal"
 	TRAFFIC_MODE_FAST   = "fast"
 )

@@ -2,6 +2,7 @@ package services
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -211,44 +212,20 @@ func (tr *TrafficReporter) StopGlobalBatch() {
 	}
 }
 
-// CountingConn wraps a net.Conn to count read/write bytes
-// The sum of read+write approximates total traffic for the connection
-// which suits the requirement of reporting "bytes".
-
-type CountingConn struct {
-	net.Conn
-	readN   int64
-	writeN  int64
-	last    int64
-	onClose func(total int64)
+func (tr *TrafficReporter) ReporterModeFast() bool {
+	return tr != nil && tr.mode == TRAFFIC_MODE_FAST
 }
 
-func (c *CountingConn) Read(b []byte) (int, error) {
-	n, err := c.Conn.Read(b)
-	atomic.AddInt64(&c.readN, int64(n))
-	return n, err
+func (tr *TrafficReporter) ReporterFastGlobal() bool {
+	return tr.ReporterModeFast() && tr.fastGlobal
 }
-func (c *CountingConn) Write(b []byte) (int, error) {
-	n, err := c.Conn.Write(b)
-	atomic.AddInt64(&c.writeN, int64(n))
-	return n, err
-}
-func (c *CountingConn) Total() int64 { return atomic.LoadInt64(&c.readN) + atomic.LoadInt64(&c.writeN) }
-func (c *CountingConn) Delta() int64 {
-	t := c.Total()
-	d := t - atomic.LoadInt64(&c.last)
-	atomic.StoreInt64(&c.last, t)
-	return d
-}
-func (c *CountingConn) Close() error {
-	if c.onClose != nil {
-		c.onClose(c.Total())
+
+func (tr *TrafficReporter) ReporterInterval() time.Duration {
+	if tr == nil || tr.interval <= 0 {
+		return 5 * time.Second
 	}
-	return c.Conn.Close()
+	return tr.interval
 }
-
-// SetOnClose sets a callback invoked right before underlying Conn.Close()
-func (c *CountingConn) SetOnClose(fn func(total int64)) { c.onClose = fn }
 
 // BuildRecord builds a TrafficRecord with common fields
 func (tr *TrafficReporter) BuildRecord(serverAddr, clientAddr, targetAddr string, outConn net.Conn, username, sniffDomain string, bytes int64) TrafficRecord {
@@ -274,4 +251,72 @@ func hostPort(a net.Addr) string {
 		return ""
 	}
 	return a.String()
+}
+
+// CountingConn wraps a net.Conn to count read/write bytes
+// The sum of read+write approximates total traffic for the connection
+// which suits the requirement of reporting "bytes".
+
+type CountingConn struct {
+	net.Conn
+	readN   int64
+	writeN  int64
+	last    int64
+	onClose func(total int64)
+}
+
+func (c *CountingConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	atomic.AddInt64(&c.readN, int64(n))
+	return n, err
+}
+func (c *CountingConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	atomic.AddInt64(&c.writeN, int64(n))
+	return n, err
+}
+
+func (c *CountingConn) Total() int64 { return atomic.LoadInt64(&c.readN) + atomic.LoadInt64(&c.writeN) }
+
+func (c *CountingConn) Delta() int64 {
+	t := c.Total()
+	d := t - atomic.LoadInt64(&c.last)
+	atomic.StoreInt64(&c.last, t)
+	return d
+}
+func (c *CountingConn) Close() error {
+	if c.onClose != nil {
+		c.onClose(c.Total())
+	}
+	return c.Conn.Close()
+}
+
+// SetOnClose sets a callback invoked right before underlying Conn.Close()
+func (c *CountingConn) SetOnClose(fn func(total int64)) {
+	log.Info("set on close")
+	c.onClose = fn
+}
+
+func (c *CountingConn) PerConnDeltaToChan(ctx context.Context, interval time.Duration, emit func(d int64)) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			if d := c.Delta(); d > 0 {
+				log.Info("traffic delta done-------------", zap.Int64("delta", d))
+				emit(d)
+			}
+			return
+		case <-ticker.C:
+			if d := c.Delta(); d > 0 {
+				log.Info("traffic delta ticker-------------", zap.Int64("delta", d))
+				emit(d)
+			}
+		}
+	}
+}
+
+func (c *CountingConn) PerConnDeltaToReport(ctx context.Context, interval time.Duration, report func(d int64)) {
+	c.PerConnDeltaToChan(ctx, interval, report)
 }
