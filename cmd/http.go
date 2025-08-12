@@ -36,34 +36,39 @@ var httpCmd = &cobra.Command{
 		// HTTP 请求鉴权（普通请求与 CONNECT）
 		proxy.OnRequest().DoFunc(func(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 			// 从 Proxy-Authorization 读取凭证
-			user, pass, ok := services.ParseBasicAuth(r.Header.Get("Proxy-Authorization"))
-			if !ok && !*args.AuthNoUser {
-				return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusProxyAuthRequired, "Proxy Authentication Required")
-			}
-			clientIP := services.ExtractIP(r.RemoteAddr)
-			allowed, _ := services.Authorize(r.Context(), "http", user, pass, clientIP, map[string]string{
-				"Method": r.Method,
-				"Host":   r.Host,
-				"Path":   r.URL.Path,
-			})
-			if !allowed {
-				return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusProxyAuthRequired, "Proxy Authentication Failed")
+			if args.AuthURL != nil && *args.AuthURL != "" {
+				user, pass, ok := services.ParseBasicAuth(r.Header.Get("Proxy-Authorization"))
+				if !ok && !*args.AuthNoUser {
+					return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusProxyAuthRequired, "Proxy Authentication Required")
+				}
+				clientIP := services.ExtractIP(r.RemoteAddr)
+				allowed, _ := services.Authorize(r.Context(), "http", user, pass, clientIP, map[string]string{
+					"Method": r.Method,
+					"Host":   r.Host,
+					"Path":   r.URL.Path,
+				})
+				if !allowed {
+					return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusProxyAuthRequired, "Proxy Authentication Failed")
+				}
 			}
 			return r, nil
 		})
 
 		proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
 			r := ctx.Req
-			user, pass, ok := services.ParseBasicAuth(r.Header.Get("Proxy-Authorization"))
-			if !ok && !*args.AuthNoUser {
-				ctx.Resp = goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusProxyAuthRequired, "Proxy Authentication Required")
-				return goproxy.RejectConnect, host
-			}
-			clientIP := services.ExtractIP(r.RemoteAddr)
-			allowed, _ := services.Authorize(r.Context(), "http-connect", user, pass, clientIP, map[string]string{"Host": host})
-			if !allowed {
-				ctx.Resp = goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusProxyAuthRequired, "Proxy Authentication Failed")
-				return goproxy.RejectConnect, host
+
+			if args.AuthURL != nil && *args.AuthURL != "" {
+				user, pass, ok := services.ParseBasicAuth(r.Header.Get("Proxy-Authorization"))
+				if !ok && !*args.AuthNoUser {
+					ctx.Resp = goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusProxyAuthRequired, "Proxy Authentication Required")
+					return goproxy.RejectConnect, host
+				}
+				clientIP := services.ExtractIP(r.RemoteAddr)
+				allowed, _ := services.Authorize(r.Context(), "http-connect", user, pass, clientIP, map[string]string{"Host": host})
+				if !allowed {
+					ctx.Resp = goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusProxyAuthRequired, "Proxy Authentication Failed")
+					return goproxy.RejectConnect, host
+				}
 			}
 			return goproxy.OkConnect, host
 		})

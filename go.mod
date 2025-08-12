@@ -16,4 +16,5 @@ require (
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/net v0.35.0 // indirect
 	golang.org/x/text v0.22.0 // indirect
+	resty.dev/v3 v3.0.0-beta.3 // indirect
 )
