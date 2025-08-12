@@ -8,6 +8,7 @@ require (
 	github.com/things-go/go-socks5 v0.0.6
 	go.uber.org/zap v1.27.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
+	resty.dev/v3 v3.0.0-beta.3
 )
 
 require (

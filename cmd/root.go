@@ -62,6 +62,13 @@ func init() {
 	// 初始化 Resty 鉴权客户端（在 flags 解析后）
 	cobra.OnInitialize(func() { services.InitAuth(args) })
 
+	// traffic report flags
+	args.TrafficURL = rootCmd.PersistentFlags().String("traffic-url", "", "traffic report http endpoint URL")
+	args.TrafficMode = rootCmd.PersistentFlags().String("traffic-mode", "normal", "traffic report mode <normal|fast>")
+	args.TrafficInterval = rootCmd.PersistentFlags().Int("traffic-interval", 5, "traffic report interval seconds when --traffic-mode=fast")
+	args.FastGlobal = rootCmd.PersistentFlags().Bool("fast-global", false, "enable global fast report, only effective when --traffic-mode=fast")
+	args.ServiceID = rootCmd.PersistentFlags().String("id", "", "service id used in traffic report (default inferred by command)")
+
 	certTLS := rootCmd.PersistentFlags().StringP("cert", "C", "proxy.crt", "cert file for tls")
 	keyTLS := rootCmd.PersistentFlags().StringP("key", "K", "proxy.key", "key file for tls")
 
