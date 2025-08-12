@@ -60,6 +60,7 @@ func handleSocksConnection(ctx context.Context, network, addr string, request *s
 			// 结束统计协程（若有），再做收尾上报
 			defer cancel()
 			rec := reporter.BuildRecord(serverAddr, clientAddr, targetAddr, outConn, "", "", total)
+			rec.Upstream = "out"
 			_ = reporter.ReportOnce(rec)
 		})
 		return c, nil
@@ -73,6 +74,7 @@ func handleSocksConnection(ctx context.Context, network, addr string, request *s
 		go c.PerConnDeltaToChan(ctxConn, interval, func(d int64) {
 			if d > 0 {
 				rec := reporter.BuildRecord(serverAddr, clientAddr, targetAddr, outConn, "", "", d)
+				rec.Upstream = "out"
 				recordsCh <- rec
 			}
 		})
@@ -82,6 +84,7 @@ func handleSocksConnection(ctx context.Context, network, addr string, request *s
 		go c.PerConnDeltaToReport(ctxConn, interval, func(d int64) {
 			if d > 0 {
 				rec := reporter.BuildRecord(serverAddr, clientAddr, targetAddr, outConn, "", "", d)
+				rec.Upstream = "out"
 				_ = reporter.ReportOnce(rec)
 			}
 		})
@@ -100,10 +103,46 @@ func createSocksServer(reporter *services.TrafficReporter, recordsCh chan servic
 	)
 }
 
-// startSocksServer 启动SOCKS5服务器
-func startSocksServer(server *socks5.Server) {
+// inboundSocksListener 统计 SOCKS 入站连接
+type inboundSocksListener struct {
+	net.Listener
+	reporter *services.TrafficReporter
+}
+
+func (l *inboundSocksListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	if l.reporter == nil {
+		return conn, nil
+	}
+	c := &services.CountingConn{Conn: conn}
+	serverAddr := *args.Local
+	clientAddr := ""
+	if conn.RemoteAddr() != nil {
+		clientAddr = conn.RemoteAddr().String()
+	}
+	targetAddr := "" // 入站侧不固定
+	c.SetOnClose(func(total int64) {
+		rec := l.reporter.BuildRecord(serverAddr, clientAddr, targetAddr, conn, "", "", total)
+		rec.Upstream = "in"
+		if err := l.reporter.ReportOnce(rec); err != nil {
+			log.Error("report inbound traffic", zap.Error(err))
+		}
+	})
+	return c, nil
+}
+
+// startSocksServer 启动SOCKS5服务器（使用入站统计 listener）
+func startSocksServer(server *socks5.Server, reporter *services.TrafficReporter) {
 	log.Info("SOCKS5 server started", zap.String("addr", *args.Local))
-	if err := server.ListenAndServe("tcp", *args.Local); err != nil {
+	ln, err := net.Listen("tcp", *args.Local)
+	if err != nil {
+		panic(err)
+	}
+	il := &inboundSocksListener{Listener: ln, reporter: reporter}
+	if err := server.Serve(il); err != nil {
 		panic(err)
 	}
 }
@@ -120,7 +159,7 @@ var socksCmd = &cobra.Command{
 		server := createSocksServer(reporter, recordsCh)
 
 		// 启动服务器
-		startSocksServer(server)
+		startSocksServer(server, reporter)
 	},
 }
 
