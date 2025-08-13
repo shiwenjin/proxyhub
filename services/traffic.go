@@ -4,18 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net"
 	"net/http"
 	"proxyhub/pkg/log"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
-	"resty.dev/v3"
 )
 
 type TrafficRecord struct {
@@ -75,57 +72,7 @@ func NewTrafficReporter(a *Args, defaultID string) *TrafficReporter {
 
 // ReportOnce sends a single GET request with record as query params
 func (tr *TrafficReporter) ReportOnce(rec TrafficRecord) error {
-	if tr == nil {
-		return nil
-	}
-	params := map[string]string{
-		"id":          rec.ID,
-		"server_addr": rec.ServerAddr,
-		"client_addr": rec.ClientAddr,
-		"bytes":       strconv.FormatInt(rec.Bytes, 10),
-	}
-	if rec.TargetAddr != "" {
-		params["target_addr"] = rec.TargetAddr
-	}
-	if rec.Username != "" {
-		params["username"] = rec.Username
-	}
-	if rec.OutLocalAddr != "" {
-		params["out_local_addr"] = rec.OutLocalAddr
-	}
-	if rec.OutRemoteAddr != "" {
-		params["out_remote_addr"] = rec.OutRemoteAddr
-	}
-	if rec.Upstream != "" {
-		params["upstream"] = rec.Upstream
-	}
-	if rec.SniffDomain != "" {
-		params["sniff_domain"] = rec.SniffDomain
-	}
-	resp, err := resty.New().R().
-		SetHeader("Accept", "application/json").
-		SetQueryParams(params).
-		Get(tr.trafficURL)
-	if err != nil {
-		return err
-	}
-
-	// 204 No Content
-	if resp.StatusCode() != http.StatusNoContent {
-		log.Warn("traffic report failed",
-			zap.Int("status", resp.StatusCode()),
-			zap.String("url", tr.trafficURL),
-			zap.Int64("bytes", rec.Bytes),
-		)
-		return fmt.Errorf("traffic report failed, status=%d", resp.StatusCode())
-	}
-
-	log.Info("traffic report ok",
-		zap.Int("status", resp.StatusCode()),
-		zap.String("url", tr.trafficURL),
-		zap.Int64("bytes", rec.Bytes),
-	)
-	return nil
+	return api.Report(rec)
 }
 
 // StartGlobalBatch ensures a single ticker that POSTs JSON array records

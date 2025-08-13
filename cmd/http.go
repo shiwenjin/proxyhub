@@ -31,78 +31,27 @@ func setupTrafficReporter() (*services.TrafficReporter, chan services.TrafficRec
 }
 
 // createDialHandler 创建处理普通HTTP请求的拨号处理器
-func createDialHandler(reporter *services.TrafficReporter, recordsCh chan services.TrafficRecord) func(ctx context.Context, network, addr string) (net.Conn, error) {
+func createDialHandler() func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return wrapConnection(ctx, network, addr, reporter, recordsCh)
+		return wrapConnection(ctx, network, addr)
 	}
 }
 
 // wrapConnection 包装连接以进行流量统计
-func wrapConnection(_ context.Context, network, addr string, reporter *services.TrafficReporter, recordsCh chan services.TrafficRecord) (net.Conn, error) {
+func wrapConnection(_ context.Context, network, addr string) (net.Conn, error) {
 	outConn, err := net.Dial(network, addr)
 	if err != nil {
 		return nil, err
 	}
 
-	if reporter == nil {
-		return outConn, nil
-	}
-
-	c := &services.CountingConn{Conn: outConn}
-	serverAddr := *args.Local
-	clientAddr := "" // 在这里获取客户端地址不太容易
-	targetAddr := addr
-
-	// 为每个连接创建独立的上下文，随连接生命周期存在
-	ctxConn, cancel := context.WithCancel(context.Background())
-
-	if !reporter.ReporterModeFast() {
-		c.SetOnClose(func(total int64) {
-			// 先结束统计协程（若有），再做收尾上报
-			defer cancel()
-			rec := reporter.BuildRecord(serverAddr, clientAddr, targetAddr, outConn, "", "", total)
-			rec.Upstream = "out"
-			err1 := reporter.ReportOnce(rec)
-			if err1 != nil {
-				log.Error("report traffic", zap.Error(err1))
-			}
-		})
-		return c, nil
-	}
-
-	interval := reporter.ReporterInterval()
-	if reporter.ReporterFastGlobal() && recordsCh != nil {
-		// fast + global: 按连接启动统计协程，输出到全局通道
-		c.SetOnClose(func(total int64) { cancel() })
-		go c.PerConnDeltaToChan(ctxConn, interval, func(d int64) {
-			if d > 0 {
-				rec := reporter.BuildRecord(serverAddr, clientAddr, targetAddr, outConn, "", "", d)
-				rec.Upstream = "out"
-				recordsCh <- rec
-			}
-		})
-	} else {
-		// fast 非全局：按连接启动统计协程，直接上报
-		c.SetOnClose(func(total int64) { cancel() })
-		go c.PerConnDeltaToReport(ctxConn, interval, func(d int64) {
-			if d > 0 {
-				rec := reporter.BuildRecord(serverAddr, clientAddr, targetAddr, outConn, "", "", d)
-				rec.Upstream = "out"
-				err = reporter.ReportOnce(rec)
-				if err != nil {
-					log.Error("report traffic", zap.Error(err))
-				}
-			}
-		})
-	}
-
-	return c, nil
+	return outConn, nil
 }
 
 // inboundListener 包装入站连接以统计用户(客户端)流量
 type inboundListener struct {
 	net.Listener
-	reporter *services.TrafficReporter
+	reporter  *services.TrafficReporter
+	recordsCh chan services.TrafficRecord
 }
 
 func (l *inboundListener) Accept() (net.Conn, error) {
@@ -122,18 +71,48 @@ func (l *inboundListener) Accept() (net.Conn, error) {
 	}
 	// 入站连接没有目标主机概念（可能多次请求多个目标），这里留空或后续在 HTTP 层补充
 	targetAddr := ""
-	c.SetOnClose(func(total int64) {
-		rec := l.reporter.BuildRecord(serverAddr, clientAddr, targetAddr, conn, "", "", total)
-		rec.Upstream = "in"
-		if err := l.reporter.ReportOnce(rec); err != nil {
-			log.Error("report inbound traffic", zap.Error(err))
-		}
-	})
+
+	if !l.reporter.ReporterModeFast() {
+		c.SetOnClose(func(total int64) {
+			rec := l.reporter.BuildRecord(serverAddr, clientAddr, targetAddr, conn, "", "", total)
+			if err := l.reporter.ReportOnce(rec); err != nil {
+				log.Error("report inbound traffic", zap.Error(err))
+			}
+		})
+	}
+
+	// 为每个连接创建独立的上下文，随连接生命周期存在
+	ctxConn, cancel := context.WithCancel(context.Background())
+
+	interval := l.reporter.ReporterInterval()
+	if l.reporter.ReporterFastGlobal() && l.recordsCh != nil {
+		// fast + global: 按连接启动统计协程，输出到全局通道
+		c.SetOnClose(func(total int64) { cancel() })
+		go c.PerConnDeltaToChan(ctxConn, interval, func(d int64) {
+			if d > 0 {
+				rec := l.reporter.BuildRecord(serverAddr, clientAddr, targetAddr, conn, "", "", d)
+				l.recordsCh <- rec
+			}
+		})
+	} else {
+		// fast 非全局：按连接启动统计协程，直接上报
+		c.SetOnClose(func(total int64) { cancel() })
+		go c.PerConnDeltaToReport(ctxConn, interval, func(d int64) {
+			if d > 0 {
+				rec := l.reporter.BuildRecord(serverAddr, clientAddr, targetAddr, conn, "", "", d)
+				err = l.reporter.ReportOnce(rec)
+				if err != nil {
+					log.Error("report traffic", zap.Error(err))
+				}
+			}
+		})
+	}
+
 	return c, nil
 }
 
 // startHTTPServer 启动HTTP代理服务器（入站连接统计）
-func startHTTPServer(proxy *goproxy.ProxyHttpServer, reporter *services.TrafficReporter) {
+func startHTTPServer(proxy *goproxy.ProxyHttpServer) {
 	log.Info("http ", zap.String("port", *args.Local))
 
 	ln, err := net.Listen("tcp", *args.Local)
@@ -141,7 +120,11 @@ func startHTTPServer(proxy *goproxy.ProxyHttpServer, reporter *services.TrafficR
 		log.Fatal(err.Error())
 		return
 	}
-	il := &inboundListener{Listener: ln, reporter: reporter}
+
+	// 设置流量报告器
+	reporter, recordsCh := setupTrafficReporter()
+
+	il := &inboundListener{Listener: ln, reporter: reporter, recordsCh: recordsCh}
 	if err := http.Serve(il, proxy); err != nil {
 		log.Fatal(err.Error())
 	}
@@ -157,17 +140,13 @@ var httpCmd = &cobra.Command{
 		proxy.Verbose = *args.Verbose
 		proxy.Logger = log.Default
 
-		// 设置流量报告器
-		reporter, recordsCh := setupTrafficReporter()
-
 		// 设置HTTP传输
 		tr := &http.Transport{}
-		tr.DialContext = createDialHandler(reporter, recordsCh)
-		tr.DisableKeepAlives = true
+		tr.DialContext = createDialHandler()
 		proxy.Tr = tr
 
 		// 启动服务器（入站连接统计）
-		startHTTPServer(proxy, reporter)
+		startHTTPServer(proxy)
 	},
 }
 
