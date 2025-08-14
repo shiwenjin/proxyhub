@@ -87,7 +87,7 @@ func (s *AuthService) authorize(ctx context.Context, protocol, username, passwor
 	}
 	s.mu.RUnlock()
 
-	allowed, _, err := api.Auth(ctx, models.AuthParams{
+	allowed, _, err := DefaultAPI.Auth(ctx, models.AuthParams{
 		User:       username,
 		Pass:       password,
 		ClientAddr: clientIP,

@@ -88,7 +88,7 @@ func (tr *TrafficReporter) ReportOnce(rec TrafficRecord) error {
 	if tr == nil {
 		return nil
 	}
-	return api.Report(rec)
+	return DefaultAPI.Report(rec)
 }
 
 // StartGlobalBatch ensures a single ticker that POSTs JSON array records
