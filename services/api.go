@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"proxyhub/models"
-	"strconv"
+	"proxyhub/pkg/log"
 	"strings"
 
 	"github.com/spf13/cast"
+	"go.uber.org/zap"
 	"resty.dev/v3"
 )
 
@@ -90,7 +91,7 @@ func (a *API) Auth(ctx context.Context, p models.AuthParams) (bool, models.AuthR
 }
 
 // Report 上报流量（act=traffic）。要求 204 No Content 视为成功。
-func (a *API) Report(rec TrafficRecord) error {
+func (a *API) ReportBatch(rec ...TrafficRecord) error {
 	if a.trafficURL == "" {
 		return errors.New("trafficURL is unavailable")
 	}
@@ -99,30 +100,12 @@ func (a *API) Report(rec TrafficRecord) error {
 		return nil
 	}
 
-	params := map[string]string{
-		"act":           "traffic",
-		"id":            rec.ID,
-		"serverAddr":    rec.ServerAddr,
-		"clientAddr":    rec.ClientAddr,
-		"bytes":         strconv.FormatInt(rec.Bytes, 10),
-		"outLocalAddr":  rec.OutLocalAddr,
-		"outRemoteAddr": rec.OutRemoteAddr,
-		"upstream":      rec.Upstream,
-	}
-	if strings.TrimSpace(rec.TargetAddr) != "" {
-		params["targetAddr"] = rec.TargetAddr
-	}
-	if strings.TrimSpace(rec.Username) != "" {
-		params["username"] = rec.Username
-	}
-	if strings.TrimSpace(rec.SniffDomain) != "" {
-		params["sniffDomain"] = rec.SniffDomain
-	}
-
+	// POST 请求，参数是 JSON 数组
 	resp, err := a.client.R().
-		SetQueryParams(params).
-		Get(a.trafficURL)
+		SetBody(rec).
+		Post(a.trafficURL)
 	if err != nil {
+		log.Error("traffic report failed", zap.Error(err))
 		return err
 	}
 

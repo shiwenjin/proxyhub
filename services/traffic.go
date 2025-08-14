@@ -1,12 +1,11 @@
 package services
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"net"
 	"net/http"
 	"proxyhub/pkg/log"
+	"proxyhub/utils"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,15 +16,15 @@ import (
 
 type TrafficRecord struct {
 	ID            string `json:"id"`
-	ServerAddr    string `json:"server_addr"`
-	ClientAddr    string `json:"client_addr"`
-	TargetAddr    string `json:"target_addr"`
+	ServerAddr    string `json:"serverAddr"`
+	ClientAddr    string `json:"clientAddr"`
+	TargetAddr    string `json:"targetAddr"`
 	Username      string `json:"username"`
 	Bytes         int64  `json:"bytes"`
-	OutLocalAddr  string `json:"out_local_addr"`
-	OutRemoteAddr string `json:"out_remote_addr"`
+	OutLocalAddr  string `json:"outLocalAddr"`
+	OutRemoteAddr string `json:"outRemoteAddr"`
 	Upstream      string `json:"upstream"`
-	SniffDomain   string `json:"sniff_domain"`
+	SniffDomain   string `json:"sniffDomain"`
 }
 
 type TrafficReporter struct {
@@ -88,7 +87,7 @@ func (tr *TrafficReporter) ReportOnce(rec TrafficRecord) error {
 	if tr == nil {
 		return nil
 	}
-	return DefaultAPI.Report(rec)
+	return DefaultAPI.ReportBatch(rec)
 }
 
 // StartGlobalBatch ensures a single ticker that POSTs JSON array records
@@ -111,44 +110,25 @@ func (tr *TrafficReporter) StartGlobalBatch(recordsCh <-chan TrafficRecord) {
 			if len(batch) == 0 {
 				return
 			}
+
+			err := DefaultAPI.ReportBatch(batch...)
+			if err != nil {
+				batch = batch[:0]
+				return
+			}
+
 			// sum bytes for logging
 			var total int64
 			for i := range batch {
 				total += batch[i].Bytes
 			}
-			buf, _ := json.Marshal(batch)
-			req, err := http.NewRequest(http.MethodPost, tr.trafficURL, bytes.NewReader(buf))
-			if err != nil {
-				log.Warn("traffic batch build request failed", zap.Error(err))
-				batch = batch[:0]
-				return
-			}
-			req.Header.Set("Content-Type", "application/json")
+
 			log.Info("traffic report batch (POST)",
 				zap.Int("records", len(batch)),
-				zap.Int64("bytes", total),
+				zap.Float64("bytes", utils.BytesToKB(total)),
 				zap.String("url", tr.trafficURL),
 			)
-			resp, err := tr.client.Do(req)
-			if err != nil {
-				log.Warn("traffic batch request error", zap.Error(err))
-				batch = batch[:0]
-				return
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusNoContent {
-				log.Warn("traffic batch failed",
-					zap.Int("status", resp.StatusCode),
-					zap.Int("records", len(batch)),
-					zap.Int64("bytes", total),
-				)
-			} else {
-				log.Info("traffic batch ok",
-					zap.Int("status", resp.StatusCode),
-					zap.Int("records", len(batch)),
-					zap.Int64("bytes", total),
-				)
-			}
+
 			batch = batch[:0]
 		}
 		for {
