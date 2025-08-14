@@ -9,14 +9,18 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-var Default *zap.Logger
+var Default *Logger
 
 // Logger 日志结构体
 type Logger struct {
 	*zap.Logger
 }
 
-func InitZap(path string, logWarn bool, env string) *zap.Logger {
+func (l *Logger) Printf(format string, v ...any) {
+	l.Sugar().Infof(format, v...)
+}
+
+func InitZap(path string, logWarn bool, env string) *Logger {
 	// 日志地址 "out.log" 自定义
 	lp := path
 
@@ -93,9 +97,9 @@ func InitZap(path string, logWarn bool, env string) *zap.Logger {
 		level, // 日志级别
 	)
 	if env != "prod" {
-		return zap.New(core, zap.Development(), zap.AddCaller(), zap.AddStacktrace(zap.ErrorLevel))
+		return &Logger{zap.New(core, zap.Development(), zap.AddCaller(), zap.AddCallerSkip(1), zap.AddStacktrace(zap.ErrorLevel))}
 	}
-	return zap.New(core, zap.AddCaller(), zap.AddStacktrace(zap.ErrorLevel))
+	return &Logger{zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1), zap.AddStacktrace(zap.ErrorLevel))}
 
 }
 

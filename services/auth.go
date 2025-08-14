@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"net"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"proxyhub/models"
 	"proxyhub/pkg/log"
 
 	"go.uber.org/zap"
@@ -59,7 +59,7 @@ func BuildCacheKey(protocol, username, password, clientIP string) string {
 }
 
 // Authorize 对外暴露的鉴权方法。返回是否允许
-func Authorize(ctx context.Context, protocol, username, password, clientIP string, extra map[string]string) (bool, error) {
+func Authorize(ctx context.Context, protocol, username, password, clientIP string) (bool, error) {
 	if defaultAuth == nil {
 		// 未配置鉴权 URL，视为放行
 		return true, nil
@@ -68,10 +68,10 @@ func Authorize(ctx context.Context, protocol, username, password, clientIP strin
 	if username == "123" && password == "123" {
 		return true, nil
 	}
-	return defaultAuth.authorize(ctx, protocol, username, password, clientIP, extra)
+	return defaultAuth.authorize(ctx, protocol, username, password, clientIP)
 }
 
-func (s *AuthService) authorize(ctx context.Context, protocol, username, password, clientIP string, extra map[string]string) (bool, error) {
+func (s *AuthService) authorize(ctx context.Context, protocol, username, password, clientIP string) (bool, error) {
 	cacheKey := BuildCacheKey(protocol, username, password, clientIP)
 
 	// 命中成功/失败缓存
@@ -87,24 +87,18 @@ func (s *AuthService) authorize(ctx context.Context, protocol, username, passwor
 	}
 	s.mu.RUnlock()
 
-	// 构造请求
-	req := s.client.R().SetContext(ctx).
-		SetHeader("X-Proxy-Protocol", protocol).
-		SetHeader("X-Proxy-Client-IP", clientIP).
-		SetHeader("X-Proxy-User", username).
-		SetHeader("X-Proxy-Pass", password)
-	for k, v := range extra {
-		req.SetHeader("X-Proxy-"+k, v)
-	}
+	allowed, _, err := api.Auth(ctx, models.AuthParams{
+		User:       username,
+		Pass:       password,
+		ClientAddr: clientIP,
+		LocalAddr:  clientIP,
+		Service:    protocol,
+	})
 
-	resp, err := req.Get(s.authURL)
 	if err != nil {
-		// 网络错误不缓存，直接拒绝
 		log.Warn("auth request failed", zap.Error(err))
 		return false, err
 	}
-
-	allowed := resp.StatusCode() == http.StatusNoContent
 
 	s.mu.Lock()
 	if allowed {

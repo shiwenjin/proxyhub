@@ -30,14 +30,18 @@ func Execute() {
 }
 
 // 确保日志系统在首次使用前已初始化
-func initLog() {
+func initConfig() {
 	if log.Default == nil {
 		log.Default = log.InitZap(*args.LogFile, *args.LogWarn, *args.Env)
+	}
+
+	if services.DefaultAPI == nil {
+		services.NewAPI(*args.AuthURL, *args.TrafficURL)
 	}
 }
 
 func init() {
-	cobra.OnInitialize(initLog)
+	cobra.OnInitialize(initConfig)
 
 	//keygen
 	if len(os.Args) > 1 {
