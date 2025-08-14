@@ -87,7 +87,7 @@ func (tr *TrafficReporter) ReportOnce(rec TrafficRecord) error {
 	if tr == nil {
 		return nil
 	}
-	return DefaultAPI.ReportBatch(rec)
+	return DefaultAPI.Report(rec)
 }
 
 // StartGlobalBatch ensures a single ticker that POSTs JSON array records
@@ -111,7 +111,7 @@ func (tr *TrafficReporter) StartGlobalBatch(recordsCh <-chan TrafficRecord) {
 				return
 			}
 
-			err := DefaultAPI.ReportBatch(batch...)
+			err := DefaultAPI.Report(batch...)
 			if err != nil {
 				batch = batch[:0]
 				return

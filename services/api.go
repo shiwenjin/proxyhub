@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"proxyhub/models"
 	"proxyhub/pkg/log"
+	"proxyhub/utils"
 	"strings"
 
 	"github.com/spf13/cast"
@@ -91,7 +92,7 @@ func (a *API) Auth(ctx context.Context, p models.AuthParams) (bool, models.AuthR
 }
 
 // Report 上报流量（act=traffic）。要求 204 No Content 视为成功。
-func (a *API) ReportBatch(rec ...TrafficRecord) error {
+func (a *API) Report(rec ...TrafficRecord) error {
 	if a.trafficURL == "" {
 		return errors.New("trafficURL is unavailable")
 	}
@@ -104,8 +105,14 @@ func (a *API) ReportBatch(rec ...TrafficRecord) error {
 	resp, err := a.client.R().
 		SetBody(rec).
 		Post(a.trafficURL)
+
+	var total int64
+	for i := range rec {
+		total += rec[i].Bytes
+	}
+
 	if err != nil {
-		log.Error("traffic report failed", zap.Error(err))
+		log.Error("traffic report failed", zap.Error(err), zap.Any("size", fmt.Sprintf("%.2fKB", utils.BytesToKB(total))))
 		return err
 	}
 

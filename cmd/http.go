@@ -19,10 +19,6 @@ type localIPKeyType struct{}
 
 var localIPKey = localIPKeyType{}
 
-type inboundConnKeyType struct{}
-
-var inboundConnKey = inboundConnKeyType{}
-
 var httpArgs services.HTTPArgs
 
 // httpCmd represents the http command
@@ -171,18 +167,10 @@ func startHTTPServer(proxy *goproxy.ProxyHttpServer) {
 
 	// 包一层 handler，在请求进入 goproxy 前：
 	// 1) 注入入口 IP
-	// 2) 若为 CONNECT，请禁用入站侧统计回调
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if localAddr, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
 			if tcpAddr, ok := localAddr.(*net.TCPAddr); ok {
 				r = r.WithContext(context.WithValue(r.Context(), localIPKey, tcpAddr.IP))
-			}
-		}
-		if r.Method == http.MethodConnect {
-			if connAny := r.Context().Value(inboundConnKey); connAny != nil {
-				if cc, ok := connAny.(*services.CountingConn); ok {
-					cc.SetOnClose(func(total int64) {})
-				}
 			}
 		}
 		proxy.ServeHTTP(w, r)
@@ -200,10 +188,6 @@ func startHTTPServer(proxy *goproxy.ProxyHttpServer) {
 	il := &inboundListener{Listener: ln, reporter: reporter, recordsCh: recordsCh}
 	srv := &http.Server{
 		Handler: handler,
-		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
-			// 将入站连接对象注入到请求上下文，便于在 CONNECT 时禁用入站统计
-			return context.WithValue(ctx, inboundConnKey, c)
-		},
 	}
 
 	if err := srv.Serve(il); err != nil {
