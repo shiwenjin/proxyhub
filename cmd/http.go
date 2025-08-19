@@ -5,10 +5,12 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"proxyhub/pkg/log"
 	"proxyhub/services"
+	"strings"
 
 	"github.com/elazarl/goproxy"
 	"github.com/spf13/cobra"
@@ -65,36 +67,93 @@ func initProxy() *goproxy.ProxyHttpServer {
 	// HTTP 请求鉴权（普通请求与 CONNECT）
 	proxy.OnRequest().DoFunc(func(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 		// 从 Proxy-Authorization 读取凭证
+		var user, pass string
+		var clientIP = services.ExtractIP(r.RemoteAddr)
+		var userId, teamId int
+
 		if args.AuthURL != nil && *args.AuthURL != "" {
-			user, pass, ok := services.ParseBasicAuth(r.Header.Get("Proxy-Authorization"))
+			var ok bool
+			user, pass, ok = services.ParseBasicAuth(r.Header.Get("Proxy-Authorization"))
 			if !ok && !*args.AuthNoUser {
 				return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusProxyAuthRequired, "Proxy Authentication Required")
 			}
-			clientIP := services.ExtractIP(r.RemoteAddr)
-			allowed, _ := services.Authorize(r.Context(), "http", user, pass, clientIP)
+
+			allowed, authResult, _ := services.AuthorizeWithResult(r.Context(), "http", user, pass, clientIP)
 			if !allowed {
 				return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusProxyAuthRequired, "Proxy Authentication Failed")
 			}
+			userId = authResult.UserId
+			teamId = authResult.TeamId
 		}
+
+		// QPS 检查（用户维度）
+		if !services.DefaultLimits.AllowQPS(user, clientIP) {
+			log.Error("超过每秒并发限制", zap.String("host", ctx.Req.Host))
+			return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusTooManyRequests, "超过每秒并发限制")
+		}
+
+		// 将鉴权信息写入 context，便于后续拨号限速
+		r = r.WithContext(services.SetAuthInfoOnContext(r.Context(), "http", user, clientIP, userId, teamId))
+
+		err := ctx.Error
+		if errors.Is(err, context.DeadlineExceeded) {
+			log.Error("超过每秒带宽限制", zap.String("host", ctx.Req.Host))
+			return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusTooManyRequests, "超过每秒带宽限制")
+		}
+
 		return r, nil
+	})
+
+	proxy.OnResponse().DoFunc(func(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
+		err := ctx.Error
+		clientIP := services.ExtractIP(ctx.Req.RemoteAddr)
+
+		// 处理 context 超时错误
+		if errors.Is(err, context.DeadlineExceeded) {
+			log.Error("context 超时", zap.String("clientIP", clientIP), zap.Error(err))
+			return goproxy.NewResponse(ctx.Req, goproxy.ContentTypeText, http.StatusRequestTimeout, "请求超时")
+		}
+
+		// 处理 rate limiter 的 burst 超限错误
+		if err != nil && strings.Contains(err.Error(), "exceeds limiter's burst") {
+			log.Error("超过最大每秒带宽限制", zap.String("clientIP", clientIP), zap.Error(err))
+			return goproxy.NewResponse(ctx.Req, goproxy.ContentTypeText, http.StatusTooManyRequests, "超过最大每秒带宽限制\n")
+		}
+		return resp
 	})
 
 	proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
 		r := ctx.Req
 
+		var user, pass string
+		var clientIP = services.ExtractIP(r.RemoteAddr)
+		var userId, teamId int
+
 		if args.AuthURL != nil && *args.AuthURL != "" {
-			user, pass, ok := services.ParseBasicAuth(r.Header.Get("Proxy-Authorization"))
+			var ok bool
+			user, pass, ok = services.ParseBasicAuth(r.Header.Get("Proxy-Authorization"))
 			if !ok && !*args.AuthNoUser {
 				ctx.Resp = goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusProxyAuthRequired, "Proxy Authentication Required")
 				return goproxy.RejectConnect, host
 			}
-			clientIP := services.ExtractIP(r.RemoteAddr)
-			allowed, _ := services.Authorize(r.Context(), "http-connect", user, pass, clientIP)
+
+			allowed, authResult, _ := services.AuthorizeWithResult(r.Context(), "http-connect", user, pass, clientIP)
 			if !allowed {
 				ctx.Resp = goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusProxyAuthRequired, "Proxy Authentication Failed")
 				return goproxy.RejectConnect, host
 			}
+			userId = authResult.UserId
+			teamId = authResult.TeamId
 		}
+
+		if !services.DefaultLimits.AllowQPS(user, clientIP) {
+			ctx.Resp = goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusTooManyRequests, "超过每秒并发限制")
+			return goproxy.RejectConnect, host
+		}
+
+		// 将鉴权信息写入 context，便于后续拨号限速
+		r = r.WithContext(services.SetAuthInfoOnContext(r.Context(), "http-connect", user, clientIP, userId, teamId))
+
 		return goproxy.OkConnect, host
 	})
 
@@ -118,7 +177,8 @@ func (l *inboundListener) Accept() (net.Conn, error) {
 	}
 	// 入站侧统计：按连接总量在关闭时上报（用户维度更贴近客户端）
 	c := &services.CountingConn{Conn: conn}
-	serverAddr := *args.Local
+
+	serverAddr := conn.LocalAddr().String()
 	clientAddr := ""
 	if conn.RemoteAddr() != nil {
 		clientAddr = conn.RemoteAddr().String()
@@ -220,7 +280,16 @@ func wrapConnection(ctx context.Context, network, addr string) (net.Conn, error)
 		return nil, err
 	}
 
-	c := &services.CountingConn{Conn: outConn}
+	// 从 context 提取鉴权信息，构建限速器
+	username, clientIP, userId, teamId := services.ExtractAuthInfo(ctx)
+
+	shared := services.DefaultLimits.BuildConnLimiters(username, clientIP)
+	limited := services.NewLimiterConn(ctx, outConn, shared)
+
+	c := &services.CountingConn{Conn: limited}
+
+	// 设置鉴权信息到 CountingConn
+	c.SetAuthInfo(username, userId, teamId)
 
 	return c, nil
 }

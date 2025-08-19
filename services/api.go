@@ -47,24 +47,14 @@ func (a *API) Auth(ctx context.Context, p models.AuthParams) (bool, models.AuthR
 	}
 
 	req := a.client.R().
-		SetContext(ctx).
-		SetQueryParam("user", p.User).
-		SetQueryParam("pass", p.Pass).
-		SetQueryParam("clientAddr", p.ClientAddr).
-		SetQueryParam("localAddr", p.LocalAddr).
-		SetQueryParam("service", p.Service).
-		SetQueryParam("sps", func() string {
-			if p.SPS {
-				return "1"
-			}
-			return "0"
-		}())
+		SetBody(p).
+		SetContext(ctx)
 
 	if strings.TrimSpace(p.Target) != "" {
 		req = req.SetQueryParam("target", p.Target)
 	}
 
-	resp, err := req.Get(a.authURL)
+	resp, err := req.Post(a.authURL)
 	if err != nil {
 		return false, res, err
 	}
@@ -76,18 +66,21 @@ func (a *API) Auth(ctx context.Context, p models.AuthParams) (bool, models.AuthR
 
 	// 解析响应头
 	h := resp.Header()
-	res.UserConns = cast.ToInt(h.Get("userconns"))
-	res.IPConns = cast.ToInt(h.Get("ipconns"))
-	res.UserRate = cast.ToInt(h.Get("userrate"))
-	res.IPRate = cast.ToInt(h.Get("iprate"))
+	res.UserId = cast.ToInt(h.Get("X-Proxy-Auth-UserId"))
+	res.TeamId = cast.ToInt(h.Get("X-Proxy-Auth-TeamId"))
 	res.UserQPS = cast.ToInt(h.Get("userqps"))
-	res.IPQPS = cast.ToInt(h.Get("ipqps"))
-	res.Upstream = strings.TrimSpace(h.Get("upstream"))
-	res.Outgoing = strings.TrimSpace(h.Get("outgoing"))
 	res.UserTotalRate = cast.ToInt(h.Get("userTotalRate"))
-	res.IPTotalRate = cast.ToInt(h.Get("ipTotalRate"))
-	res.PortTotalRate = cast.ToInt(h.Get("portTotalRate"))
-	res.RotationTime = cast.ToInt(h.Get("RotationTime"))
+
+	// res.UserConns = cast.ToInt(h.Get("userconns"))
+	// res.IPConns = cast.ToInt(h.Get("ipconns"))
+	// res.UserRate = cast.ToInt(h.Get("userrate"))
+	// res.IPRate = cast.ToInt(h.Get("iprate"))
+	// res.IPQPS = cast.ToInt(h.Get("ipqps"))
+	// res.Upstream = strings.TrimSpace(h.Get("upstream"))
+	// res.Outgoing = strings.TrimSpace(h.Get("outgoing"))
+	// res.IPTotalRate = cast.ToInt(h.Get("ipTotalRate"))
+	// res.PortTotalRate = cast.ToInt(h.Get("portTotalRate"))
+	// res.RotationTime = cast.ToInt(h.Get("RotationTime"))
 	return true, res, nil
 }
 
@@ -117,7 +110,10 @@ func (a *API) Report(rec ...TrafficRecord) error {
 	}
 
 	if resp.StatusCode() != http.StatusNoContent {
-		return fmt.Errorf("traffic report failed, status=%d", resp.StatusCode())
+		log.Error("traffic report failed", zap.Any("size", fmt.Sprintf("%.2fKB", utils.BytesToKB(total))), zap.Any("resp", resp.String()))
+		return err
 	}
+
+	log.Info("traffic report success", zap.Any("size", fmt.Sprintf("%.2fKB", utils.BytesToKB(total))))
 	return nil
 }

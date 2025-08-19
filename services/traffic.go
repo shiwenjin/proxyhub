@@ -16,15 +16,17 @@ import (
 
 type TrafficRecord struct {
 	ID            string `json:"id"`
-	ServerAddr    string `json:"serverAddr"`
-	ClientAddr    string `json:"clientAddr"`
-	TargetAddr    string `json:"targetAddr"`
-	Username      string `json:"username"`
-	Bytes         int64  `json:"bytes"`
-	OutLocalAddr  string `json:"outLocalAddr"`
-	OutRemoteAddr string `json:"outRemoteAddr"`
-	Upstream      string `json:"upstream"`
-	SniffDomain   string `json:"sniffDomain"`
+	ServerAddr    string `json:"serverAddr"`    // 客户端请求的代理地址,格式: IP:端口
+	ClientAddr    string `json:"clientAddr"`    // 客户端地址,格式: IP:端口
+	TargetAddr    string `json:"targetAddr"`    // 目标地址,格式: IP:端口,tcp/udp代理时,这个是空
+	Username      string `json:"username"`      // 代理认证用户名,tcp/udp代理时,这个是空
+	UserId        int    `json:"userId"`        // 代理认证用户ID,tcp/udp代理时,这个是空
+	TeamId        int    `json:"teamId"`        // 代理认证团队ID,tcp/udp代理时,这个是空
+	Bytes         int64  `json:"bytes"`         // 流量字节数
+	OutLocalAddr  string `json:"outLocalAddr"`  // 代理对外建立的TCP连接的本地地址，格式: IP:端
+	OutRemoteAddr string `json:"outRemoteAddr"` // 代理对外建立的TCP连接的远程地址，格式: IP:端口。
+	Upstream      string `json:"upstream"`      // 使用的上级，格式是标准URL格式，如果没有使用上级，这里是空
+	SniffDomain   string `json:"sniffDomain"`   // 只有当 sps 功能，使用参数 --sniff-domain 开启了嗅探功能 ，才会有这个参数。参数“sniff_domain”是嗅探到的域名，格式：域名，或者： 域名:端口；只有在客户端访问的是 http/https 网址的时候这个参数才有值，其它情况为空。
 }
 
 type TrafficReporter struct {
@@ -206,6 +208,23 @@ type CountingConn struct {
 	writeN  int64
 	last    int64
 	onClose func(total int64)
+
+	// 鉴权信息
+	username string
+	userId   int
+	teamId   int
+}
+
+// SetAuthInfo 设置鉴权信息
+func (c *CountingConn) SetAuthInfo(username string, userId, teamId int) {
+	c.username = username
+	c.userId = userId
+	c.teamId = teamId
+}
+
+// GetAuthInfo 获取鉴权信息
+func (c *CountingConn) GetAuthInfo() (username string, userId, teamId int) {
+	return c.username, c.userId, c.teamId
 }
 
 func (c *CountingConn) Read(b []byte) (int, error) {

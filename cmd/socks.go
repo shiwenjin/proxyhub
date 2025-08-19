@@ -78,10 +78,15 @@ func createSocksServer() *socks5.Server {
 					return nil, statute.ErrUserAuthFailed
 				}
 				clientIP := services.ExtractIP(request.RemoteAddr)
-				allowed, _ := services.Authorize(ctx, "socks5", username, password, clientIP)
+				allowed, authResult, _ := services.AuthorizeWithResult(ctx, "socks5", username, password, clientIP)
 				if !allowed {
 					return nil, statute.ErrUserAuthFailed
 				}
+				if !services.DefaultLimits.AllowQPS(username, clientIP) {
+					return nil, statute.ErrUserAuthFailed
+				}
+				// 保存鉴权信息到 context，便于 Dial 之后拿到进行限速
+				ctx = services.SetAuthInfoOnContext(ctx, "socks5", username, clientIP, authResult.UserId, authResult.TeamId)
 			}
 
 			return handleSocksConnection(ctx, network, addr, request)
@@ -89,7 +94,7 @@ func createSocksServer() *socks5.Server {
 	)
 }
 
-func handleSocksConnection(_ context.Context, network, addr string, request *socks5.Request) (net.Conn, error) {
+func handleSocksConnection(ctx context.Context, network, addr string, request *socks5.Request) (net.Conn, error) {
 	log.Info("socks request", zap.Any("remote", request.RemoteAddr), zap.Any("dest", request.DestAddr))
 	// 连接真实服务器
 	// 如果设置了bind-listen标志，使用入口(本地监听)IP作为出口IP
@@ -107,8 +112,15 @@ func handleSocksConnection(_ context.Context, network, addr string, request *soc
 		return nil, err
 	}
 
+	// 从 context 提取鉴权信息，构建限速器
+	username, clientIP, userId, teamId := services.ExtractAuthInfo(ctx)
+	shared := services.DefaultLimits.BuildConnLimiters(username, clientIP)
+	limited := services.NewLimiterConn(ctx, outConn, shared)
 	// 包装连接以进行计数
-	c := &services.CountingConn{Conn: outConn}
+	c := &services.CountingConn{Conn: limited}
+
+	// 设置鉴权信息到 CountingConn
+	c.SetAuthInfo(username, userId, teamId)
 
 	return c, nil
 }
